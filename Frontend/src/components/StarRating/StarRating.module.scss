@@ -43,6 +43,18 @@
     white-space: nowrap;
   }
 
+  // Modo interactivo
+  &.interactive {
+    .star {
+      cursor: pointer;
+      transition: transform 0.15s ease, color 0.15s ease;
+
+      &:hover {
+        transform: scale(1.2);
+      }
+    }
+  }
+
   // Size variants
   &.small {
     .star svg {

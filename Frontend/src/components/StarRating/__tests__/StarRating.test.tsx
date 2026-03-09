@@ -80,8 +80,7 @@ describe('StarRating Component', () => {
       render(<StarRating rating={7} />);
 
       const container = screen.getByRole('img');
-      // El componente debería mostrar 5.0, no 7.0
-      expect(container).toHaveAttribute('aria-label', 'Rating: 7.0 out of 5 stars');
+      expect(container).toHaveAttribute('aria-label', 'Rating: 5.0 out of 5 stars');
     });
 
     it('handles decimal ratings correctly', () => {
@@ -124,7 +123,7 @@ describe('StarRating Component', () => {
       render(<StarRating rating={-1} />);
 
       const container = screen.getByRole('img');
-      expect(container).toHaveAttribute('aria-label', 'Rating: -1.0 out of 5 stars');
+      expect(container).toHaveAttribute('aria-label', 'Rating: 0.0 out of 5 stars');
     });
 
     it('handles undefined totalRatings gracefully', () => {

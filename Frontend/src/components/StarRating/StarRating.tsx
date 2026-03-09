@@ -1,8 +1,11 @@
 /**
  * StarRating Component
- * Componente de calificación con estrellas (modo readonly para lista de cursos)
+ * Componente de calificación con estrellas (soporta modo readonly e interactivo)
  */
 
+'use client';
+
+import { useState } from 'react';
 import styles from './StarRating.module.scss';
 
 interface StarRatingProps {
@@ -12,6 +15,7 @@ interface StarRatingProps {
   size?: 'small' | 'medium' | 'large'; // Tamaño visual
   readonly?: boolean; // Modo solo lectura
   className?: string; // Clase CSS adicional
+  onRate?: (rating: number) => void; // Callback para modo interactivo
 }
 
 /**
@@ -64,35 +68,45 @@ export const StarRating = ({
   size = 'medium',
   readonly = false,
   className = '',
+  onRate,
 }: StarRatingProps) => {
+  const [hoverRating, setHoverRating] = useState<number | null>(null);
+
+  const clampedRating = Math.max(0, Math.min(5, rating));
+  const displayRating = hoverRating ?? clampedRating;
+  const isInteractive = !readonly && !!onRate;
+
   /**
    * Determina el estado de relleno de cada estrella
    */
   const getStarFillState = (starIndex: number): 'empty' | 'half' | 'full' => {
-    const currentRating = Math.max(0, Math.min(5, rating)); // Clamp 0-5
-
-    if (currentRating >= starIndex) return 'full';
-    if (currentRating >= starIndex - 0.5) return 'half';
+    if (displayRating >= starIndex) return 'full';
+    if (displayRating >= starIndex - 0.5) return 'half';
     return 'empty';
   };
 
-  // Formatear el rating para mostrar (1 decimal)
-  const formattedRating = rating.toFixed(1);
+  // Formatear el rating para mostrar (1 decimal, valor clamped)
+  const formattedRating = clampedRating.toFixed(1);
 
   return (
     <div
-      className={`${styles.starRating} ${styles[size]} ${className}`}
+      className={`${styles.starRating} ${styles[size]} ${isInteractive ? styles.interactive : ''} ${className}`}
       role="img"
       aria-label={`Rating: ${formattedRating} out of 5 stars${
         showCount && totalRatings > 0 ? `, ${totalRatings} ratings` : ''
       }`}
     >
-      <div className={styles.stars}>
+      <div
+        className={styles.stars}
+        onMouseLeave={isInteractive ? () => setHoverRating(null) : undefined}
+      >
         {[1, 2, 3, 4, 5].map((star) => (
           <span
             key={star}
             className={`${styles.star} ${styles[getStarFillState(star)]}`}
             aria-hidden="true"
+            onMouseEnter={isInteractive ? () => setHoverRating(star) : undefined}
+            onClick={isInteractive ? () => onRate(star) : undefined}
           >
             <StarIcon fillState={getStarFillState(star)} />
           </span>
