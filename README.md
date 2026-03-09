@@ -97,14 +97,67 @@ yarn test       # Ejecutar tests
 yarn lint       # Verificar código
 ```
 
+## Arquitectura del sistema
+
+```mermaid
+graph TD
+    subgraph Clientes
+        FE[Frontend Web<br>Next.js 15]
+        AND[Android App<br>Kotlin + Compose]
+        IOS[iOS App<br>Swift + SwiftUI]
+    end
+
+    subgraph Backend
+        API[FastAPI<br>puerto 8000]
+        DB[(PostgreSQL 15<br>puerto 5432)]
+    end
+
+    FE -->|HTTP REST| API
+    AND -->|HTTP REST| API
+    IOS -->|HTTP REST| API
+    API -->|SQLAlchemy 2.0| DB
+```
+
 ## Modelo de datos
 
-```
-Course ──< Lesson ──< Class
-  │
-  ├──< CourseRating   (calificaciones por usuario)
-  │
-  └──>< Teacher       (relación muchos a muchos)
+```mermaid
+erDiagram
+    Course {
+        uuid id
+        string name
+        string slug
+        string description
+        string thumbnail
+        float average_rating
+        int total_ratings
+    }
+    Teacher {
+        uuid id
+        string name
+    }
+    Lesson {
+        uuid id
+        string name
+        string slug
+        string video_url
+    }
+    Class {
+        uuid id
+        string name
+        string video_url
+    }
+    CourseRating {
+        uuid id
+        uuid course_id
+        uuid user_id
+        int rating
+        timestamp deleted_at
+    }
+
+    Course }o--o{ Teacher : "course_teachers"
+    Course ||--o{ Lesson : "tiene"
+    Lesson ||--o{ Class : "contiene"
+    Course ||--o{ CourseRating : "recibe"
 ```
 
 ## Profesor
