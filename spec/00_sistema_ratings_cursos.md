@@ -1,456 +1,249 @@
-# Plan de Implementación Técnico: Sistema de Ratings para Platziflix
-
-**Versión**: 1.0
-**Fecha**: 2025-09-17
-**Estimación**: 16 horas
-**Alcance**: Backend + Frontend
-
-## Análisis Arquitectural del Contexto Actual
-
-### Patrones Identificados
-- **Backend**: Service Layer Pattern + Repository Pattern con SQLAlchemy
-- **Database**: Soft deletes con `deleted_at`, timestamping automático via `BaseModel`
-- **API**: Dependency Injection con FastAPI Dependencies
-- **Frontend**: Next.js 15 App Router + Server Components + TypeScript strict
-- **Testing**: Piramide de testing (Vitest + React Testing Library)
-
-### Arquitectura de Datos Actual
-```
-BaseModel (id, created_at, updated_at, deleted_at)
-├── Course (name, description, thumbnail, slug)
-├── Teacher (name, email)
-├── Lesson (course_id, name, description, slug, video_url)
-└── CourseTeacher (course_id, teacher_id) [Many-to-Many]
-```
-
-## Plan de Implementación por Fases
-
-### FASE 1: Database Layer (2 horas)
-**Prioridad**: Crítica - Base de todo el sistema
-
-#### 1.1 Crear Migración Alembic
-- **Archivo**: `Backend/app/alembic/versions/[timestamp]_add_course_ratings_table.py`
-- **Patrón**: Seguir estructura de migración existente
-
-```sql
-CREATE TABLE course_ratings (
-    id INTEGER PRIMARY KEY,
-    course_id INTEGER NOT NULL REFERENCES courses(id),
-    user_id INTEGER NOT NULL, -- Por ahora sin FK, preparado para auth futuro
-    rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    deleted_at TIMESTAMP NULL,
-    CONSTRAINT unique_user_course_rating UNIQUE(course_id, user_id, deleted_at)
-);
-
-CREATE INDEX idx_course_ratings_course_id ON course_ratings(course_id);
-CREATE INDEX idx_course_ratings_user_id ON course_ratings(user_id);
-```
-
-#### 1.2 Consideraciones Técnicas de Performance
-- **Índices estratégicos**: course_id (consultas frecuentes), user_id (futuras queries)
-- **Constraint UNIQUE compuesto**: Incluye `deleted_at` para permitir soft deletes
-- **Validación CHECK**: Rating 1-5 a nivel de BD para integridad
-
-### FASE 2: Backend Models & Services (4 horas)
-
-#### 2.1 Modelo CourseRating (1h)
-- **Archivo**: `Backend/app/models/course_rating.py`
-- **Patrón**: Herencia de `BaseModel`, siguiendo convenciones existentes
-
-```python
-class CourseRating(BaseModel):
-    __tablename__ = 'course_ratings'
-
-    course_id = Column(Integer, ForeignKey('courses.id'), nullable=False)
-    user_id = Column(Integer, nullable=False)  # Future-proof para auth
-    rating = Column(Integer, CheckConstraint('rating >= 1 AND rating <= 5'), nullable=False)
-
-    # Relationships
-    course = relationship("Course", back_populates="ratings")
-```
-
-#### 2.2 Actualizar Modelo Course (1h)
-- **Archivo**: `Backend/app/models/course.py`
-- **Cambios**: Agregar relationship + propiedades calculadas
-
-```python
-class Course(BaseModel):
-    # ... campos existentes ...
-
-    # Nueva relación
-    ratings = relationship("CourseRating", back_populates="course", cascade="all, delete-orphan")
-
-    @property
-    def average_rating(self) -> float:
-        """Calcula rating promedio dinámicamente"""
-        active_ratings = [r for r in self.ratings if r.deleted_at is None]
-        if not active_ratings:
-            return 0.0
-        return sum(r.rating for r in active_ratings) / len(active_ratings)
-
-    @property
-    def total_ratings(self) -> int:
-        """Cuenta total de ratings activos"""
-        return len([r for r in self.ratings if r.deleted_at is None])
-```
-
-#### 2.3 Extender CourseService (2h)
-- **Archivo**: `Backend/app/services/course_service.py`
-- **Patrón**: Seguir estructura de métodos existentes
-
-```python
-class CourseService:
-    # ... métodos existentes ...
-
-    def get_course_ratings(self, course_id: int) -> List[Dict[str, Any]]:
-        """Obtiene todos los ratings de un curso"""
-
-    def add_course_rating(self, course_id: int, user_id: int, rating: int) -> Dict[str, Any]:
-        """Agrega/actualiza rating de usuario para curso"""
-
-    def update_course_rating(self, course_id: int, user_id: int, rating: int) -> Dict[str, Any]:
-        """Actualiza rating existente"""
-
-    def delete_course_rating(self, course_id: int, user_id: int) -> bool:
-        """Soft delete de rating"""
-
-    def get_user_course_rating(self, course_id: int, user_id: int) -> Optional[Dict[str, Any]]:
-        """Obtiene rating específico de usuario para curso"""
-```
-
-#### 2.4 Optimizaciones de Performance
-- **Eager Loading**: Incluir ratings en consultas de curso cuando necesario
-- **Agregaciones SQL**: Calcular promedios en base de datos para performance
-- **Caching Strategy**: Preparado para Redis en queries frecuentes
-
-### FASE 3: Backend API Endpoints (2 horas)
-
-#### 3.1 Nuevos Endpoints en main.py
-- **Patrón**: Seguir estructura de dependency injection existente
-
-```python
-@app.post("/courses/{course_id}/ratings")
-def add_course_rating(
-    course_id: int,
-    rating_data: RatingRequest,
-    course_service: CourseService = Depends(get_course_service)
-) -> Dict[str, Any]:
-    """Agrega rating a curso"""
-
-@app.get("/courses/{course_id}/ratings")
-def get_course_ratings(
-    course_id: int,
-    course_service: CourseService = Depends(get_course_service)
-) -> List[Dict[str, Any]]:
-    """Obtiene ratings de curso"""
-
-@app.put("/courses/{course_id}/ratings/{user_id}")
-def update_course_rating(
-    course_id: int,
-    user_id: int,
-    rating_data: RatingRequest,
-    course_service: CourseService = Depends(get_course_service)
-) -> Dict[str, Any]:
-    """Actualiza rating existente"""
-
-@app.delete("/courses/{course_id}/ratings/{user_id}")
-def delete_course_rating(
-    course_id: int,
-    user_id: int,
-    course_service: CourseService = Depends(get_course_service)
-) -> Dict[str, str]:
-    """Elimina rating (soft delete)"""
-```
-
-#### 3.2 Pydantic Models para Validación
-- **Archivo**: `Backend/app/models/requests.py` (nuevo)
-
-```python
-from pydantic import BaseModel, Field
-
-class RatingRequest(BaseModel):
-    user_id: int = Field(..., gt=0)
-    rating: int = Field(..., ge=1, le=5)
-
-class RatingResponse(BaseModel):
-    id: int
-    course_id: int
-    user_id: int
-    rating: int
-    created_at: str
-    updated_at: str
-```
-
-### FASE 4: Frontend Types & API Integration (2 horas)
-
-#### 4.1 Actualizar Types (30min)
-- **Archivo**: `Frontend/src/types/index.ts`
-- **Cambios**: Agregar interfaces para ratings
-
-```typescript
-export interface Course {
-  id: number;
-  title: string;
-  teacher: string;
-  duration: number;
-  thumbnail: string;
-  slug: string;
-  // Nuevos campos
-  averageRating?: number;
-  totalRatings?: number;
-}
-
-export interface CourseRating {
-  id: number;
-  courseId: number;
-  userId: number;
-  rating: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface RatingRequest {
-  userId: number;
-  rating: number;
-}
-```
-
-#### 4.2 API Service Layer (1h)
-- **Archivo**: `Frontend/src/services/api.ts` (nuevo)
-- **Patrón**: Centralizar llamadas a API
-
-```typescript
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-
-export const ratingsApi = {
-  getCourseRatings: async (courseId: number): Promise<CourseRating[]> => {},
-  addCourseRating: async (courseId: number, data: RatingRequest): Promise<CourseRating> => {},
-  updateCourseRating: async (courseId: number, userId: number, data: RatingRequest): Promise<CourseRating> => {},
-  deleteCourseRating: async (courseId: number, userId: number): Promise<void> => {}
-};
-```
-
-#### 4.3 Error Handling & Types (30min)
-- Manejo consistente de errores HTTP
-- TypeScript strict compliance
-- Validación de responses del backend
-
-### FASE 5: Frontend Components (4 horas)
-
-#### 5.1 Componente StarRating Reutilizable (2h)
-- **Archivo**: `Frontend/src/components/StarRating/StarRating.tsx`
-- **Patrón**: Componente controlado con TypeScript estricto
-
-```typescript
-interface StarRatingProps {
-  rating: number;
-  onRatingChange?: (rating: number) => void;
-  readonly?: boolean;
-  size?: 'small' | 'medium' | 'large';
-  showCount?: boolean;
-  totalRatings?: number;
-}
-
-export const StarRating = ({
-  rating,
-  onRatingChange,
-  readonly = false,
-  size = 'medium',
-  showCount = false,
-  totalRatings = 0
-}: StarRatingProps) => {
-  // Implementación con useState para hover effects
-  // CSS Modules para estilos
-  // Accesibilidad con ARIA labels
-};
-```
-
-**Consideraciones de UX**:
-- Hover effects para interactividad
-- Estados loading durante submit
-- Feedback visual inmediato
-- Accesibilidad completa (keyboard navigation)
-
-#### 5.2 Actualizar Course Component (1h)
-- **Archivo**: `Frontend/src/components/Course/Course.tsx`
-- **Cambios**: Integrar StarRating en card view
-
-```typescript
-export const Course = ({
-  id,
-  title,
-  teacher,
-  duration,
-  thumbnail,
-  averageRating,
-  totalRatings
-}: CourseType) => {
-  return (
-    <article className={styles.courseCard}>
-      {/* ... contenido existente ... */}
-      <div className={styles.ratingSection}>
-        <StarRating
-          rating={averageRating || 0}
-          readonly={true}
-          showCount={true}
-          totalRatings={totalRatings}
-          size="small"
-        />
-      </div>
-    </article>
-  );
-};
-```
-
-#### 5.3 Actualizar CourseDetail Page (1h)
-- **Archivo**: `Frontend/src/app/course/[slug]/page.tsx`
-- **Cambios**: Agregar rating interactivo
-
-```typescript
-export default async function CoursePage({ params }: { params: { slug: string } }) {
-  const course = await fetchCourseBySlug(params.slug);
-
-  return (
-    <div>
-      {/* ... contenido existente ... */}
-      <section className={styles.ratingsSection}>
-        <h3>Califica este curso</h3>
-        <StarRating
-          rating={userRating || 0}
-          onRatingChange={handleRatingSubmit}
-          size="large"
-        />
-        <div className={styles.ratingsStats}>
-          <StarRating
-            rating={course.averageRating || 0}
-            readonly={true}
-            showCount={true}
-            totalRatings={course.totalRatings}
-          />
-        </div>
-      </section>
-    </div>
-  );
-}
-```
-
-### FASE 6: Testing & Quality Assurance (2 horas)
-
-#### 6.1 Backend Tests (1h)
-- **Unit Tests**: CourseService methods
-- **Integration Tests**: API endpoints
-- **Database Tests**: Constraints y relationships
-
-```python
-# Backend/app/tests/test_course_ratings.py
-def test_add_course_rating():
-def test_rating_constraints():
-def test_soft_delete_ratings():
-def test_average_rating_calculation():
-```
-
-#### 6.2 Frontend Tests (1h)
-- **Component Tests**: StarRating interactividad
-- **Integration Tests**: Rating submission flow
-- **Accessibility Tests**: Keyboard navigation
-
-```typescript
-// Frontend/src/components/StarRating/__tests__/StarRating.test.tsx
-describe('StarRating Component', () => {
-  test('renders correct number of stars');
-  test('handles rating changes');
-  test('supports keyboard navigation');
-  test('displays rating count correctly');
-});
-```
-
-## Consideraciones Técnicas Críticas
-
-### Performance & Escalabilidad
-1. **Database Indexing**: Índices optimizados para queries frecuentes
-2. **Lazy Loading**: Ratings cargados solo cuando necesario
-3. **Caching Strategy**: Redis preparado para ratings agregados
-4. **Pagination**: Preparado para grandes volúmenes de ratings
-
-### Security & Data Integrity
-1. **Input Validation**: Pydantic + TypeScript + CHECK constraints
-2. **SQL Injection**: SQLAlchemy ORM protege automáticamente
-3. **Rate Limiting**: Preparado para throttling en endpoints críticos
-4. **User Validation**: user_id validation (preparado para auth futuro)
-
-### Mantenibilidad & Extensibilidad
-1. **Clean Architecture**: Separación clara de responsabilidades
-2. **SOLID Principles**: Interfaces extensibles para futuras features
-3. **Type Safety**: TypeScript estricto en todo Frontend
-4. **Code Reuse**: StarRating component reutilizable
-
-## Riesgos Técnicos & Mitigación
-
-### Riesgos Identificados
-1. **Performance**: Queries de agregación pueden ser costosas
-   - **Mitigación**: Índices específicos + caching + paginación
-
-2. **Data Consistency**: Concurrent ratings updates
-   - **Mitigación**: UNIQUE constraints + optimistic locking
-
-3. **UX Complexity**: Loading states durante submissions
-   - **Mitigación**: Optimistic updates + rollback en errores
-
-4. **Future Auth Integration**: user_id actualmente sin validación
-   - **Mitigación**: Campo preparado, validación agregada cuando auth implemente
-
-## Criterios de Aceptación Técnicos
-
-### Database Layer
-- ✅ Migración ejecuta sin errores
-- ✅ Constraints funcionan correctamente
-- ✅ Índices optimizan performance de queries
-
-### Backend API
-- ✅ Endpoints responden con códigos HTTP correctos
-- ✅ Validación Pydantic funciona correctamente
-- ✅ Soft deletes mantienen integridad de datos
-- ✅ Cálculos de rating promedio son precisos
-
-### Frontend Components
-- ✅ StarRating renderiza correctamente en todos los tamaños
-- ✅ Interactividad funciona sin errores
-- ✅ Estados de loading manejan correctamente
-- ✅ Accesibilidad completa implementada
-
-### Testing
-- ✅ Cobertura de tests >= 90%
-- ✅ Todos los tests unitarios e integración pasan
-- ✅ No hay regresiones en funcionalidad existente
-
-### Performance
-- ✅ Queries de ratings < 100ms en datasets normales
-- ✅ UI responde < 200ms en interacciones
-- ✅ Bundle size incrementa < 10KB
-
-## Secuencia de Implementación Recomendada
-
-1. **Migración DB** → **Modelo CourseRating** → **Tests DB**
-2. **Actualizar Course Model** → **CourseService Methods** → **Tests Backend**
-3. **API Endpoints** → **Pydantic Models** → **Tests Integration**
-4. **Frontend Types** → **API Service** → **StarRating Component**
-5. **Actualizar Components** → **Integration** → **Tests Frontend**
-6. **QA Testing** → **Performance Testing** → **Deploy**
-
-## Estimación Final
-
-| Fase | Componente | Horas |
-|------|------------|-------|
-| 1 | Database & Migrations | 2h |
-| 2 | Backend Models & Services | 4h |
-| 3 | Backend API Endpoints | 2h |
-| 4 | Frontend Types & Services | 2h |
-| 5 | Frontend Components | 4h |
-| 6 | Testing & QA | 2h |
-| **TOTAL** | **Sistema de Ratings Completo** | **16h** |
+# Análisis Técnico: Sistema de Ratings — Platziflix
+
+**Versión**: 2.0
+**Fecha**: 2026-03-15
+**Alcance**: Backend + Frontend + Mobile
 
 ---
 
-*Este plan sigue estrictamente los patrones arquitecturales existentes de Platziflix y está diseñado para ser implementado incrementalmente, manteniendo la estabilidad del sistema en cada fase.*
+## Estado Actual del Sistema
+
+### Backend ✅ Implementado
+
+La base es sólida: 6 endpoints documentados, validación en 3 capas (Pydantic + service + DB CHECK), soft delete correcto.
+
+**Bug corregido en esta sesión**: el `UNIQUE(course_id, user_id, deleted_at)` original no prevenía duplicados activos porque en PostgreSQL `NULL != NULL`. Reemplazado por un PARTIAL INDEX en la migración `c3f1a2b4d5e6`:
+
+```sql
+CREATE UNIQUE INDEX uq_active_course_user_rating
+ON course_ratings (course_id, user_id)
+WHERE deleted_at IS NULL;
+```
+
+**Endpoints disponibles:**
+
+| Método | Endpoint | Descripción | Respuesta |
+|--------|----------|-------------|-----------|
+| POST | `/courses/{id}/ratings` | Crear o actualizar | 201 |
+| GET | `/courses/{id}/ratings` | Listar ratings activos | 200 |
+| GET | `/courses/{id}/ratings/stats` | Promedio, total, distribución | 200 |
+| GET | `/courses/{id}/ratings/user/{user_id}` | Rating del usuario | 200 / 204 |
+| PUT | `/courses/{id}/ratings/{user_id}` | Actualizar | 200 |
+| DELETE | `/courses/{id}/ratings/{user_id}` | Soft delete | 204 |
+
+**Validación multicapa:**
+- Pydantic: `rating: int = Field(..., ge=1, le=5)`
+- Service: `if not 1 <= rating <= 5: raise ValueError`
+- DB: `CHECK (rating >= 1 AND rating <= 5)`
+
+### Frontend ⚠️ Parcialmente completo
+
+| Archivo | Estado | Detalle |
+|---------|--------|---------|
+| `StarRating.tsx` | ✅ Correcto | Modo readonly + interactivo (`onRate`, hover, `'use client'`) |
+| `StarRating.module.scss` | ✅ Correcto | Clase `.interactive` con `cursor: pointer` y `scale(1.2)` |
+| `Course.tsx` | ✅ Correcto | Muestra `StarRating` readonly en cards del home |
+| `CourseDetail.tsx` | ⚠️ Parcial | Muestra promedio en detalle, pero bug pre-existente: usa `course.title`/`course.teacher` que no existen en el tipo |
+| `CourseRatingSection.tsx` | ⚠️ Funcional con deuda | Permite calificar pero no carga el rating previo del usuario |
+| `ratingsApi.ts` | ❌ Bug crítico | Línea 143: URL `/ratings/${userId}` en lugar de `/ratings/user/${userId}` |
+| `types/rating.ts` | ⚠️ Incompleto | `RatingStats` no incluye `rating_distribution` aunque el endpoint lo devuelve |
+
+### Mobile — No implementado
+
+- **Android** (`CourseDTO.kt`): Gson descarta silenciosamente `average_rating` y `total_ratings` (campos no declarados)
+- **iOS** (`CourseDTO.swift`): `Codable` descarta los mismos campos por la misma razón
+
+Los datos ya llegan del API; solo faltan los DTOs y los componentes visuales.
+
+---
+
+## Bugs Críticos Identificados
+
+### 1. URL incorrecta en `ratingsApi.getUserRating`
+
+**Archivo**: `Frontend/src/services/ratingsApi.ts:143`
+
+```ts
+// ❌ Incorrecto
+const url = `${API_BASE_URL}/courses/${courseId}/ratings/${userId}`;
+
+// ✅ Correcto
+const url = `${API_BASE_URL}/courses/${courseId}/ratings/user/${userId}`;
+```
+
+**Impacto**: `CourseRatingSection` nunca puede saber si el usuario ya calificó. El estado inicial siempre muestra 0 estrellas aunque el usuario tenga una calificación activa.
+
+---
+
+### 2. Semántica HTTP incorrecta en endpoint de rating por usuario
+
+**Archivo**: `Backend/app/main.py`
+
+El endpoint `GET /courses/{id}/ratings/user/{user_id}` devuelve `HTTP 204` cuando el usuario no ha calificado. HTTP 204 es "éxito sin cuerpo", no "recurso no encontrado". `handleApiResponse` en el cliente lanza excepción por `Invalid response format` porque 204 no tiene `Content-Type: application/json`.
+
+**Fix**: Cambiar a `HTTP 404` con cuerpo `{"detail": "Rating not found"}` cuando el usuario no ha calificado. Actualizar `ratingsApi.getUserRating()` para manejar 404 → `null`.
+
+---
+
+### 3. `rating_distribution` con claves string vs. int
+
+**Archivo**: `Backend/app/schemas/rating.py`
+
+```python
+# ❌ Incorrecto — JSON siempre serializa claves de objetos como strings
+rating_distribution: Dict[int, int]
+
+# ✅ Correcto
+rating_distribution: Dict[str, int]
+```
+
+**Impacto**: Clientes que accedan con clave entera (`distribution[1]`) obtienen `undefined`/`null`.
+
+---
+
+## Deuda Técnica Identificada
+
+### N+1 Queries en `GET /courses`
+
+**Archivo**: `Backend/app/services/course_service.py` (método `get_all_courses`)
+
+Por cada curso en el listado se ejecutan 2 queries SQL adicionales para calcular `average_rating` y `total_ratings`. Con N cursos = 2N+1 queries totales por request.
+
+**Fix**: Reemplazar el loop por una query batch con `GROUP BY`:
+
+```python
+rating_stats = (
+    db.query(
+        CourseRating.course_id,
+        func.coalesce(func.avg(CourseRating.rating), 0.0).label('avg_rating'),
+        func.count(CourseRating.id).label('total')
+    )
+    .filter(CourseRating.deleted_at.is_(None))
+    .group_by(CourseRating.course_id)
+    .all()
+)
+stats_map = {row.course_id: row for row in rating_stats}
+```
+
+Reducción: 2N+1 queries → 2 queries totales (una para cursos, una para ratings agregados).
+
+---
+
+### `CourseRatingSection` no carga el rating previo
+
+**Archivo**: `Frontend/src/components/CourseDetail/CourseRatingSection.tsx`
+
+Falta un `useEffect` que llame a `getUserRating` al montar. El usuario siempre ve 0 estrellas aunque ya haya calificado.
+
+```tsx
+useEffect(() => {
+  ratingsApi.getUserRating(courseId, PLACEHOLDER_USER_ID)
+    .then(existing => {
+      if (existing) setUserRating(existing.rating);
+    });
+}, [courseId]);
+```
+
+---
+
+### Sin FK a tabla Users
+
+`user_id` en `CourseRating` es un `Integer` sin `ForeignKey`. Se pueden crear ratings para usuarios inexistentes. No hay cascade posible. El `PLACEHOLDER_USER_ID = 1` hardcodeado en el frontend hace que todos los usuarios compartan la misma calificación.
+
+---
+
+## Plan de Implementación
+
+### Fase 1 — Bugs Críticos (inmediato)
+
+1. **Fix URL** `ratingsApi.getUserRating` → `/ratings/user/${userId}`
+2. **Fix HTTP 204 → 404** en `main.py` endpoint de rating por usuario
+3. **Fix tipo** `Dict[int, int]` → `Dict[str, int]` en `schemas/rating.py`
+4. **Agregar `rating_distribution`** a `RatingStats` en `types/rating.ts`
+5. **Fix campos** `course.title` → `course.name` en `CourseDetail.tsx`
+
+### Fase 2 — UX Completa (siguiente sprint)
+
+6. **Cargar rating previo** en `CourseRatingSection`: `useEffect` + `getUserRating` al montar
+7. **Actualizar promedio** tras calificación exitosa (callback o re-fetch del curso padre)
+8. **Optimistic updates**: actualizar estado local antes de confirmar con el servidor
+
+### Fase 3 — Performance
+
+9. **Resolver N+1** en `get_all_courses()` con query batch (ver sección de deuda técnica)
+10. **Paginación** en `GET /courses/{id}/ratings` (params `limit` y `offset`)
+
+### Fase 4 — Mobile Android
+
+11. Actualizar `CourseDTO.kt`: agregar `averageRating: Double?` y `totalRatings: Int?`
+12. Actualizar `Course.kt` (domain model) y `CourseMapper.kt`
+13. Crear `StarRatingView.kt` como `@Composable` con `Icons.Filled.Star` / `Icons.Outlined.Star`
+14. Integrar `StarRatingView` en `CourseCard.kt`
+15. (Con auth) Crear `RatingRepository.kt` y `RatingViewModel.kt` para escritura
+
+### Fase 5 — Mobile iOS
+
+16. Actualizar `CourseDTO.swift`: agregar `averageRating: Double?`, `totalRatings: Int?` con `CodingKeys`
+17. Actualizar `Course.swift` (domain) y `CourseMapper.swift`
+18. Crear `StarRatingView.swift` en `Presentation/Views/`
+19. Integrar en `CourseCardView.swift`
+20. (Con auth) Crear `RemoteRatingRepository.swift` siguiendo el patrón de `RemoteCourseRepository`
+
+### Fase 6 — Autenticación (prerequisito para producción)
+
+21. Definir estrategia de auth (JWT recomendado)
+22. Crear tabla `users` y migración con FK `course_ratings.user_id → users.id`
+23. Middleware de autenticación en FastAPI que inyecte el `user_id`
+24. Validar en endpoints de ratings que el `user_id` del token coincida con el del path
+25. Eliminar `PLACEHOLDER_USER_ID` del frontend — obtener el ID del contexto de sesión
+26. Interim: usar UUID en `localStorage`/`SharedPreferences`/`UserDefaults` como ID temporal entre plataformas
+
+---
+
+## Riesgos
+
+| Riesgo | Impacto | Mitigación |
+|--------|---------|------------|
+| `user_id=1` compartido en dev | Todos los devs sobreescriben la calificación del mismo usuario | UUID aleatorio en `localStorage` hasta tener auth |
+| N+1 queries con catálogo creciente | 201 queries con 100 cursos; bottleneck en connection pool | Resolver antes de carga de producción (Fase 3) |
+| Bug URL `getUserRating` | Estado inicial siempre 0 estrellas | Fix inmediato (Fase 1) |
+| Inconsistencia `user_id` entre plataformas | Ratings duplicados del "mismo usuario" en DB | UUID compartido o auth real (Fase 6) |
+| Pérdida de ratings al implementar auth | Ratings con `user_id=1` quedan huérfanos | Script de migración como parte de Fase 6 |
+
+---
+
+## Arquitectura Objetivo (CourseDetail)
+
+```
+CourseDetailPage (app/courses/[slug]/page.tsx) — Server Component
+  └── CourseDetailComponent                    — Server Component
+        ├── StarRating rating={avg} readonly   — dato estático del servidor
+        └── CourseRatingSection courseId={id}  — Client Component
+              ├── useEffect → getUserRating al mount
+              ├── StarRating rating={userRating} onRate={handleRate}
+              └── on success: invalidar promedio del padre
+```
+
+---
+
+## Separación de Repositorios en Mobile (cuando se implemente escritura)
+
+```
+Domain/Repositories/
+  CourseRepositoryProtocol    — getCourses, getCourseBySlug  (existente)
+  RatingRepositoryProtocol    — getRatings, createRating, updateRating, deleteRating  (nuevo)
+
+Data/Repositories/
+  RemoteCourseRepository      — existente
+  RemoteRatingRepository      — nuevo, mismo patrón
+```
+
+---
+
+## Migraciones Aplicadas
+
+| Revisión | Descripción |
+|----------|-------------|
+| `d18a08253457` | Schema inicial: courses, teachers, lessons, course_teachers |
+| `0e3a8766f785` | Tabla `course_ratings` con CHECK constraint (rating 1-5) |
+| `c3f1a2b4d5e6` | Fix UNIQUE constraint → PARTIAL INDEX `WHERE deleted_at IS NULL` |
